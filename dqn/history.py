@@ -1,5 +1,7 @@
 import numpy as np
-
+#History 存储一次喂给agent的图片帧
+#默认是NCHW格式的。
+#history_length 相当于channel数
 class History:
   def __init__(self, config):
     self.cnn_format = config.cnn_format
@@ -9,11 +11,11 @@ class History:
 
     self.history = np.zeros(
         [history_length, screen_height, screen_width], dtype=np.float32)
-
+#将screen 加到history最后，最前面的history丢掉
   def add(self, screen):
     self.history[:-1] = self.history[1:]
     self.history[-1] = screen
-
+#将所有图片都置为0
   def reset(self):
     self.history *= 0
 

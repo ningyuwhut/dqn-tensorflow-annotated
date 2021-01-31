@@ -5,6 +5,8 @@ import random
 import numpy as np
 from tqdm import tqdm
 import tensorflow as tf
+from functools import reduce
+
 
 from .base import BaseModel
 from .history import History
@@ -39,10 +41,12 @@ class Agent(BaseModel):
     ep_rewards, actions = [], []
 
     screen, reward, action, terminal = self.env.new_random_game()
-
+    #先整一个样本需要的4帧画面
     for _ in range(self.history_length):
       self.history.add(screen)
 
+  #从第0步开始一直往下走
+  #learn_start 表示从这一步开始进行学习，之前都只是积累数据
     for self.step in tqdm(range(start_step, self.max_step), ncols=70, initial=start_step):
       if self.step == self.learn_start:
         num_game, self.update_count, ep_reward = 0, 0, 0.
@@ -50,12 +54,14 @@ class Agent(BaseModel):
         ep_rewards, actions = [], []
 
       # 1. predict
+      #从history中获取预测所需的四帧画面,然后选择action
       action = self.predict(self.history.get())
       # 2. act
+      #获取该action对应的state 、reward和terminal
       screen, reward, terminal = self.env.act(action, is_training=True)
       # 3. observe
       self.observe(screen, reward, action, terminal)
-
+      #一局结束则重置游戏，重新开一局
       if terminal:
         screen, reward, action, terminal = self.env.new_random_game()
 
@@ -67,7 +73,7 @@ class Agent(BaseModel):
 
       actions.append(action)
       total_reward += reward
-
+      #每隔一段时间就记录当前的相关数据
       if self.step >= self.learn_start:
         if self.step % self.test_step == self.test_step - 1:
           avg_reward = total_reward / self.test_step
@@ -112,7 +118,11 @@ class Agent(BaseModel):
           ep_reward = 0.
           ep_rewards = []
           actions = []
-
+#在当前state 下，使用epslon贪婪策略 选择action
+#ep 应该就是epslon
+#在测试阶段 ep值是固定的，即随机的概率是一定的
+#在训练阶段，如果当前step 小于learn_start,那么就全部进行随机选择
+#如果 step 大于learn_start,那么此时探索的概率就线性下降。
   def predict(self, s_t, test_ep=None):
     ep = test_ep or (self.ep_end +
         max(0., (self.ep_start - self.ep_end)
@@ -124,9 +134,12 @@ class Agent(BaseModel):
       action = self.q_action.eval({self.s_t: [s_t]})[0]
 
     return action
-
+#观察到action的reward和下一个状态,将 下一个screen加入到history
+#同时将各种相关信息打包放入memory
+#如果开始学习了，且 当前step 正好在训练频率上，那么使用batch进行学习
+#如果刚好也处在更新目标q网络的频率上，那么使用预测q网络来更新目标q网络
   def observe(self, screen, reward, action, terminal):
-    reward = max(self.min_reward, min(self.max_reward, reward))
+    reward = max(self.min_reward, min(self.max_reward, reward))#将reward限制在范围内
 
     self.history.add(screen)
     self.memory.add(screen, reward, action, terminal)
@@ -138,6 +151,13 @@ class Agent(BaseModel):
       if self.step % self.target_q_update_step == self.target_q_update_step - 1:
         self.update_target_q_network()
 
+#如果memory 中连一个history_length都不够，则不进行更新
+#否则，从memory 中采样 一个batch
+
+#使用目标q网络预测poststate的action的未来累积回报分布
+#选择每个样本 累积回报 最大的action
+#然后更新目标q值,并将样本的目标q值和action值作为输入喂给模型
+#调用预测q网络去预测prestate的q值
   def q_learning_mini_batch(self):
     if self.memory.count < self.history_length:
       return
@@ -147,7 +167,7 @@ class Agent(BaseModel):
     t = time.time()
     if self.double_q:
       # Double Q-learning
-      pred_action = self.q_action.eval({self.s_t: s_t_plus_1})
+      pred_action = self.q_action.eval({self.s_t: s_t_plus_1}) #未来累积回报最大的action
 
       q_t_plus_1_with_pred_action = self.target_q_with_idx.eval({
         self.target_s_t: s_t_plus_1,
@@ -159,6 +179,7 @@ class Agent(BaseModel):
 
       terminal = np.array(terminal) + 0.
       max_q_t_plus_1 = np.max(q_t_plus_1, axis=1)
+      print("max_q_t_plus_1 %s\n",max_q_t_plus_1)
       target_q_t = (1. - terminal) * self.discount * max_q_t_plus_1 + reward
 
     _, q_t, loss, summary_str = self.sess.run([self.optim, self.q, self.loss, self.q_summary], {
@@ -219,11 +240,14 @@ class Agent(BaseModel):
       else:
         self.l4, self.w['l4_w'], self.w['l4_b'] = linear(self.l3_flat, 512, activation_fn=activation_fn, name='l4')
         self.q, self.w['q_w'], self.w['q_b'] = linear(self.l4, self.env.action_size, name='q')
-
+      print("self.q %s", self.q)
       self.q_action = tf.argmax(self.q, dimension=1)
 
       q_summary = []
       avg_q = tf.reduce_mean(self.q, 0)
+      print("avg_q %s",avg_q)
+      #1,action
+      xrange = range
       for idx in xrange(self.env.action_size):
         q_summary.append(tf.summary.histogram('q/%s' % idx, avg_q[idx]))
       self.q_summary = tf.summary.merge(q_summary, 'q_summary')
@@ -268,21 +292,22 @@ class Agent(BaseModel):
             linear(self.target_l3_flat, 512, activation_fn=activation_fn, name='target_l4')
         self.target_q, self.t_w['q_w'], self.t_w['q_b'] = \
             linear(self.target_l4, self.env.action_size, name='target_q')
-
+      print("self.target_q %s", self.target_q)
       self.target_q_idx = tf.placeholder('int32', [None, None], 'outputs_idx')
       self.target_q_with_idx = tf.gather_nd(self.target_q, self.target_q_idx)
+      print("self.target_q_with_idx %s",self.target_q_with_idx)
 
     with tf.variable_scope('pred_to_target'):
       self.t_w_input = {}
       self.t_w_assign_op = {}
-
+      #将q网络的参数复制到目标q网络
       for name in self.w.keys():
         self.t_w_input[name] = tf.placeholder('float32', self.t_w[name].get_shape().as_list(), name=name)
         self.t_w_assign_op[name] = self.t_w[name].assign(self.t_w_input[name])
 
     # optimizer
     with tf.variable_scope('optimizer'):
-      self.target_q_t = tf.placeholder('float32', [None], name='target_q_t')
+      self.target_q_t = tf.placeholder('float32', [None], name='target_q_t') #目标q值
       self.action = tf.placeholder('int64', [None], name='action')
 
       action_one_hot = tf.one_hot(self.action, self.env.action_size, 1.0, 0.0, name='action_one_hot')
@@ -325,11 +350,11 @@ class Agent(BaseModel):
 
     tf.initialize_all_variables().run()
 
-    self._saver = tf.train.Saver(self.w.values() + [self.step_op], max_to_keep=30)
+    self._saver = tf.train.Saver(list(self.w.values()) + [self.step_op], max_to_keep=30)
 
     self.load_model()
     self.update_target_q_network()
-
+#t_w_input 的输入就是self.w,即预测q网络的参数，将该参数赋值给对应的目标网络中的参数
   def update_target_q_network(self):
     for name in self.w.keys():
       self.t_w_assign_op[name].eval({self.t_w_input[name]: self.w[name].eval()})
@@ -373,6 +398,7 @@ class Agent(BaseModel):
       self.env.env.monitor.start(gym_dir)
 
     best_reward, best_idx = 0, 0
+    xrange=range
     for idx in xrange(n_episode):
       screen, reward, action, terminal = self.env.new_random_game()
       current_reward = 0

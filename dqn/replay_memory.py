@@ -22,7 +22,7 @@ class ReplayMemory:
     self.batch_size = config.batch_size
     self.count = 0
     self.current = 0
-
+    #count表示memory中已经有的样本数量，current表示当前所在的样本下标
     # pre-allocate prestates and poststates for minibatch
     self.prestates = np.empty((self.batch_size, self.history_length) + self.dims, dtype = np.float16)
     self.poststates = np.empty((self.batch_size, self.history_length) + self.dims, dtype = np.float16)
@@ -35,21 +35,37 @@ class ReplayMemory:
     self.screens[self.current, ...] = screen
     self.terminals[self.current] = terminal
     self.count = max(self.count, self.current + 1)
-    self.current = (self.current + 1) % self.memory_size
+    self.current = (self.current + 1) % self.memory_size #如果当前样本已经达到上限，则从头开始设置
 
+#取index 之前的history-1个元素，加上index自身，组成长度为history_length的样本
   def getState(self, index):
     assert self.count > 0, "replay memory is empy, use at least --random_steps 1"
     # normalize index to expected range, allows negative indexes
     index = index % self.count
     # if is not in the beginning of matrix
+    # 此时直接将index 作为最后一个元素，取index 之前 的history-1个元素，加上index自己，共history个元素
     if index >= self.history_length - 1:
       # use faster slicing
       return self.screens[(index - (self.history_length - 1)):(index + 1), ...]
     else:
+      #由于index < history_length-1,所以，需要从memory的最后取样本
       # otherwise normalize indexes and use slower list based access
       indexes = [(index - i) % self.count for i in reversed(range(self.history_length))]
       return self.screens[indexes, ...]
+#从memory 中采样一个batch
+#每次 采样一个合法的index， [index-1-history_length:index-1](闭区间)之间的元素作为一个样本,加入prestates中
+#[index-history_length:index](闭区间)之间的元素作为一个样本,加入poststates中
+#index 不能出现如下两个现象
+#1.index >=current & index -history_length < current
+#2. [index-history_length, index-1](闭区间)之间不能包含终止state
 
+#第一个条件是说选择的样本不能包含current，大概是因为这样的话选出来的样本包含的帧就不是连续的了
+#第二个条件比较好理解，是指样本中不能包含终止状态的帧。但是注意这里是限制prestates，poststates的最后一个帧还是可以包含终止状态的。
+
+#从这里可以推测出，memory中的帧都是连续的
+#prestates 和poststates 是连续的帧，只是差了一帧，即prestates[i]的下一帧就是poststates[i]
+
+#一个样本包含四个帧，还有最后一个帧对应的action、reward、是否终止态。同时还有四个帧对应的下一帧。
   def sample(self):
     # memory must include poststate, prestate and history
     assert self.count > self.history_length
@@ -71,6 +87,7 @@ class ReplayMemory:
         break
       
       # NB! having index first is fastest in C-order matrices
+      #len(indexes)始终是最后一个元素的下标
       self.prestates[len(indexes), ...] = self.getState(index - 1)
       self.poststates[len(indexes), ...] = self.getState(index)
       indexes.append(index)

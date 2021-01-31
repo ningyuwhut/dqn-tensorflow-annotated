@@ -2,6 +2,7 @@
 logs
 .DS_Store
 
+assets/*
 # data
 samples
 *checkpoints/
